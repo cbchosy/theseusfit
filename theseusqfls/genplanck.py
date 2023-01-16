@@ -9,6 +9,12 @@ from scipy.optimize import curve_fit
 from scipy.interpolate import RectBivariateSpline
 
 torch.manual_seed(0)
+if torch.cuda.is_available():
+    device = 'cuda'
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = 'cpu'
 
 h = 4.1357e-15
 c = 2.9979e8
@@ -46,7 +52,7 @@ def import_hyperspectral(filename):
     energy = 1E9 * h * c / np.flip(wavelength, axis=0)
     cube = np.flip(cube, axis=0)  # TODO add Jacobian transformation here
     cube = 10000 * math.pi * cube
-    return energy, cube
+    return energy, cube  # TODO check if pl intensity signal can be converted from float64 to float32
 
 
 def eval_interp(delta_e, theta):
@@ -158,11 +164,17 @@ def fit_qfls(energy, pl, guesses=None):
                        gamma, theta, bandgap)
     objective.add(cost_fn)
     error_sq = objective.error_squared_norm()
-    optimizer = th.LevenbergMarquardt(objective, max_iterations=100, step_size=0.1)
+    optimizer = th.LevenbergMarquardt(objective, max_iterations=10, step_size=0.1)
     theseus_optim = th.TheseusLayer(optimizer)
+    theseus_optim.to(device=device)  # TODO check correct data type here
 
-    theseus_inputs = {'energy': energy_tensor, 'pl': pl_tensor, 'qfls': guess_tensors[0], 'gamma': guess_tensors[1],
-                      'theta': guess_tensors[2], 'bandgap': guess_tensors[3]}
+    # Send all inputs to GPU if available
+    theseus_inputs = {'energy': energy_tensor.to(device),
+                      'pl': pl_tensor.to(device),
+                      'qfls': guess_tensors[0].to(device),
+                      'gamma': guess_tensors[1].to(device),
+                      'theta': guess_tensors[2].to(device),
+                      'bandgap': guess_tensors[3].to(device)}
     objective.update(theseus_inputs)
 
     with torch.no_grad():
