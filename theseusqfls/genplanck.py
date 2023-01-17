@@ -48,13 +48,13 @@ SPLINE_INTERP = RectBivariateSpline(THETA, ENERGY, integrals, kx=3, ky=3, s=0)
 
 def import_hyperspectral(filename):
     with h5py.File(filename, 'r') as f:
-        wavelength = np.asarray(f['Cube/Wavelength'])
-        cube = np.asarray(f['Cube/Images'])
+        wavelength = np.array(f['Cube/Wavelength'], dtype=np.float32)
+        cube = np.asarray(f['Cube/Images'], dtype=np.float32)
     cube = np.clip(cube, 0, None)
     energy = 1E9 * h * c / np.flip(wavelength, axis=0)
     cube = np.flip(cube, axis=0)  # TODO add Jacobian transformation here
     cube = 10000 * math.pi * cube
-    return energy, cube  # TODO check if pl intensity signal can be converted from float64 to float32
+    return energy, cube
 
 
 def eval_interp(delta_e, theta):
@@ -80,9 +80,9 @@ def gen_lookup_table():
     """
     theta_fine = np.linspace(np.min(THETA), np.max(THETA), 50*THETA.size)
     energy_fine = np.linspace(np.min(ENERGY), np.max(ENERGY), 50*ENERGY.size)
-    d_theta = torch.tensor(SPLINE_INTERP.partial_derivative(1, 0)(theta_fine, energy_fine), dtype=torch.float64)
-    d_energy = torch.tensor(SPLINE_INTERP.partial_derivative(0, 1)(theta_fine, energy_fine), dtype=torch.float64)
-    G_tensor = torch.tensor(SPLINE_INTERP(theta_fine, energy_fine), dtype=torch.float64)
+    d_theta = torch.tensor(SPLINE_INTERP.partial_derivative(1, 0)(theta_fine, energy_fine), dtype=torch.float32)
+    d_energy = torch.tensor(SPLINE_INTERP.partial_derivative(0, 1)(theta_fine, energy_fine), dtype=torch.float32)
+    G_tensor = torch.tensor(SPLINE_INTERP(theta_fine, energy_fine), dtype=torch.float32)
     return torch.tensor(theta_fine), torch.tensor(energy_fine), d_theta, d_energy, G_tensor
 
 
@@ -152,26 +152,23 @@ def fit_qfls(energy, pl, guesses=None):
         except:
             pass
     energy_tensor = torch.tensor(energy)
-    pl_flat = pl.flatten()[:, None]
-    pl_tensor = torch.tensor(pl_flat, dtype=torch.float64)
-    guess_tensors = [guesses[i]*torch.ones(pl_flat.shape, dtype=torch.float64) for i in range(len(guesses))]
+    pl_tensor = torch.tensor(np.flatten(pl))
+    guess_tensors = [guesses[i]*torch.ones(pl_tensor.shape, 1, dtype=torch.float64) for i in range(len(guesses))]
 
-    qfls = th.Vector(1, name='qfls', dtype=torch.float64)
-    gamma = th.Vector(1, name='gamma', dtype=torch.float64)
-    theta = th.Vector(1, name='theta', dtype=torch.float64)
-    bandgap = th.Vector(1, name='bandgap', dtype=torch.float64)
+    qfls = th.Vector(1, name='qfls', dtype=torch.float32)
+    gamma = th.Vector(1, name='gamma', dtype=torch.float32)
+    theta = th.Vector(1, name='theta', dtype=torch.float32)
+    bandgap = th.Vector(1, name='bandgap', dtype=torch.float32)
 
     cost_weight = th.ScaleCostWeight(torch.tensor(1.0, dtype=torch.float64))
     objective = th.Objective(dtype=torch.float64)
-    objective.to(device=device)
-    # TODO Evaluating error_squared_norm needs to take place on GPU. Move relevant tensors to GPU beforehand
     cost_fn = QFLSCost(cost_weight, th.Variable(energy_tensor, name='energy'), th.Variable(pl_tensor, name='pl'), qfls,
                        gamma, theta, bandgap)
     objective.add(cost_fn)
     error_sq = objective.error_squared_norm()
     optimizer = th.LevenbergMarquardt(objective, max_iterations=2, step_size=0.1)
     theseus_optim = th.TheseusLayer(optimizer)
-    theseus_optim = theseus_optim.to(device=device)  # TODO check correct data type here
+    theseus_optim.to(device=device)  # TODO check correct data type here
 
     # Send all inputs to GPU if available
     theseus_inputs = {'energy': energy_tensor.to(device),
