@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple
+import pkg_resources
 import theseus as th
 import torch
 import math
@@ -23,7 +24,8 @@ q = 1.602e-19
 T = 298.15
 alpha = 10
 
-LOOKUP_TABLE = 'data/lookup_table.csv'
+LOOKUP_TABLE = "C:/Users/cbc37/Desktop/theseusqfls/theseusqfls/data/lookup_table.csv"
+# STREAM = pkg_resources.resource_stream(__name__, LOOKUP_TABLE)
 THETA = np.linspace(0.5, 2, round(1.5 / 0.05) + 1)  # Values taken from appropriate endpoints of lookup table
 ENERGY = np.linspace(-60, 100, round((100 + 60) / 0.1) + 1)  # Values taken from appropriate endpoints of lookup table
 integrals = pd.read_csv(LOOKUP_TABLE, names=['G'], usecols=[2])
@@ -150,8 +152,9 @@ def fit_qfls(energy, pl, guesses=None):
         except:
             pass
     energy_tensor = torch.tensor(energy)
-    pl_tensor = torch.tensor(np.flatten(pl))
-    guess_tensors = [guesses[i]*torch.ones(pl_tensor.shape, 1, dtype=torch.float64) for i in range(len(guesses))]
+    pl_flat = pl.flatten()[:, None]
+    pl_tensor = torch.tensor(pl_flat, dtype=torch.float64)
+    guess_tensors = [guesses[i]*torch.ones(pl_flat.shape, dtype=torch.float64) for i in range(len(guesses))]
 
     qfls = th.Vector(1, name='qfls', dtype=torch.float64)
     gamma = th.Vector(1, name='gamma', dtype=torch.float64)
@@ -160,13 +163,15 @@ def fit_qfls(energy, pl, guesses=None):
 
     cost_weight = th.ScaleCostWeight(torch.tensor(1.0, dtype=torch.float64))
     objective = th.Objective(dtype=torch.float64)
+    objective.to(device=device)
+    # TODO Evaluating error_squared_norm needs to take place on GPU. Move relevant tensors to GPU beforehand
     cost_fn = QFLSCost(cost_weight, th.Variable(energy_tensor, name='energy'), th.Variable(pl_tensor, name='pl'), qfls,
                        gamma, theta, bandgap)
     objective.add(cost_fn)
     error_sq = objective.error_squared_norm()
-    optimizer = th.LevenbergMarquardt(objective, max_iterations=10, step_size=0.1)
+    optimizer = th.LevenbergMarquardt(objective, max_iterations=2, step_size=0.1)
     theseus_optim = th.TheseusLayer(optimizer)
-    theseus_optim.to(device=device)  # TODO check correct data type here
+    theseus_optim = theseus_optim.to(device=device)  # TODO check correct data type here
 
     # Send all inputs to GPU if available
     theseus_inputs = {'energy': energy_tensor.to(device),
@@ -278,3 +283,6 @@ class QFLSCost(th.CostFunction):
             self.weight.copy(), self.E.copy(), self.I.copy(), self.qfls.copy(), self.gamma.copy(), self.theta.copy(),
             self.bandgap.copy(), name=new_name
         )
+if __name__ == '__main__':
+    energy, pl = import_hyperspectral("C:/Users/cbc37/Desktop/theseusqfls/theseusqfls/data/example_photometric.h5")
+    result = fit_qfls(energy, pl)
