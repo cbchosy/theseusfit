@@ -6,6 +6,7 @@ import math
 import h5py
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from scipy.optimize import curve_fit
 from scipy.interpolate import RectBivariateSpline
 
@@ -72,18 +73,18 @@ def eval_interp(delta_e, theta):
     return g
 
 
-def gen_lookup_table():
+def gen_lookup_table(accuracy_factor=2):
     """Generates tensor of interpolated integral values
 
     :return: Torch tensors for theta, gamma, the partial derivative of G w.r.t theta, the partial derivative of G w.r.t
         gamma, and the values for G.
     """
-    theta_fine = np.linspace(np.min(THETA), np.max(THETA), 50*THETA.size)
-    energy_fine = np.linspace(np.min(ENERGY), np.max(ENERGY), 50*ENERGY.size)
+    theta_fine = np.linspace(np.min(THETA), np.max(THETA), accuracy_factor*THETA.size)
+    energy_fine = np.linspace(np.min(ENERGY), np.max(ENERGY), accuracy_factor*ENERGY.size)
     d_theta = torch.tensor(SPLINE_INTERP.partial_derivative(1, 0)(theta_fine, energy_fine), dtype=torch.float32)
     d_energy = torch.tensor(SPLINE_INTERP.partial_derivative(0, 1)(theta_fine, energy_fine), dtype=torch.float32)
     G_tensor = torch.tensor(SPLINE_INTERP(theta_fine, energy_fine), dtype=torch.float32)
-    return torch.tensor(theta_fine), torch.tensor(energy_fine), d_theta, d_energy, G_tensor
+    return torch.tensor(theta_fine, dtype=torch.float32), torch.tensor(energy_fine, dtype=torch.float32), d_theta, d_energy, G_tensor
 
 
 # def generate_gen_planck(E, qfls, gamma, theta, bandgap, noise_factor=0.0):
@@ -136,7 +137,7 @@ def interp_index(arr, val):
     return indices
 
 
-def fit_qfls(energy, pl, guesses=None):
+def fit_qfls(energy, pl, guesses=None, batch_size=2048):
     """Fits input hyperspectral data according to the generalized Planck equation
 
     :param energy: Input photon energy (eV)
@@ -154,8 +155,74 @@ def fit_qfls(energy, pl, guesses=None):
     energy_tensor = torch.tensor(energy[None, :], dtype=torch.float32, device=device)
     pl_reshape = pl.reshape((pl.shape[0], -1)).T
     pl_tensor = torch.tensor(pl_reshape, dtype=torch.float32, device=device)
-    guess_tensors = [guesses[i]*torch.ones((pl_reshape.shape[0], 1), dtype=torch.float32) for i in range(len(guesses))]
+    guess_tensors = [guesses[i]*torch.ones((batch_size, 1), dtype=torch.float32) for i in range(len(guesses))]
+    result = {'qfls': np.zeros(pl_reshape.shape[0], dtype=np.float32),
+              'gamma': np.zeros(pl_reshape.shape[0], dtype=np.float32),
+              'theta': np.zeros(pl_reshape.shape[0], dtype=np.float32),
+              'bandgap': np.zeros(pl_reshape.shape[0], dtype=np.float32)}
+    n_loops = round(pl_reshape.shape[0]/batch_size)
 
+    # energy = th.Variable()
+    # qfls = th.Vector(1, name='qfls', dtype=torch.float32)
+    # qfls.to(device)
+    # gamma = th.Vector(1, name='gamma', dtype=torch.float32)
+    # gamma.to(device)
+    # theta = th.Vector(1, name='theta', dtype=torch.float32)
+    # theta.to(device)
+    # bandgap = th.Vector(1, name='bandgap', dtype=torch.float32)
+    # bandgap.to(device)
+    #
+    # cost_weight = th.ScaleCostWeight(torch.tensor(1.0, dtype=torch.float32, device=device))
+    # objective = th.Objective(dtype=torch.float32)
+    # objective.to(device=device)
+    # cost_fn = QFLSCost(cost_weight, th.Variable(energy_tensor, name='energy'), th.Variable(pl_tensor, name='pl'), qfls,
+    #                    gamma, theta, bandgap)
+    # objective.add(cost_fn)
+    # error_sq = objective.error_squared_norm()
+    # optimizer = th.LevenbergMarquardt(objective, max_iterations=10, step_size=0.5)
+    # theseus_optim = th.TheseusLayer(optimizer)
+    # theseus_optim.to(device=device)
+
+    optimizer, objective = init_optimizer(batch_size=batch_size, data_size=energy.size)
+    inputs = {'energy': energy_tensor.to(device),
+              'pl': pl_tensor[0:batch_size, :].to(device),
+              'qfls': guess_tensors[0].to(device),
+              'gamma': guess_tensors[1].to(device),
+              'theta': guess_tensors[2].to(device),
+              'bandgap': guess_tensors[3].to(device)}
+    with torch.no_grad():
+        for i in tqdm(range(n_loops)):
+            inputs['pl'] = pl_tensor[i*batch_size:(i+1)*batch_size, :]
+            objective.update(inputs)
+            updated_inputs, info = optimizer.forward(
+                inputs, optimizer_kwargs={'track_best_solution': True,
+                                          # 'verbose': True
+                                          })
+            for key in result.keys():
+                result[key][i*batch_size:(i+1)*batch_size] = info.best_solution[key].numpy().flatten()
+    return result
+    #
+    #
+    #
+    # # Send all inputs to GPU if available
+    # theseus_inputs = {'energy': energy_tensor.to(device),
+    #                   'pl': pl_tensor.to(device),
+    #                   'qfls': guess_tensors[0].to(device),
+    #                   'gamma': guess_tensors[1].to(device),
+    #                   'theta': guess_tensors[2].to(device),
+    #                   'bandgap': guess_tensors[3].to(device)}
+    # objective.update(theseus_inputs)
+    #
+    # with torch.no_grad():
+    #     updated_inputs, info = theseus_optim.forward(
+    #         theseus_inputs, optimizer_kwargs={'track_best_solution': True, 'verbose': True})
+    # return info.best_solution
+
+def init_optimizer(batch_size, data_size):
+    energy = th.Variable(torch.ones((batch_size, data_size), dtype=torch.float32), name='energy')
+    energy.to(device)
+    pl = th.Variable(torch.ones((batch_size, data_size), dtype=torch.float32), name='pl')
+    pl.to(device)
     qfls = th.Vector(1, name='qfls', dtype=torch.float32)
     qfls.to(device)
     gamma = th.Vector(1, name='gamma', dtype=torch.float32)
@@ -168,27 +235,13 @@ def fit_qfls(energy, pl, guesses=None):
     cost_weight = th.ScaleCostWeight(torch.tensor(1.0, dtype=torch.float32, device=device))
     objective = th.Objective(dtype=torch.float32)
     objective.to(device=device)
-    cost_fn = QFLSCost(cost_weight, th.Variable(energy_tensor, name='energy'), th.Variable(pl_tensor, name='pl'), qfls,
-                       gamma, theta, bandgap)  
+    cost_fn = QFLSCost(cost_weight, energy, pl, qfls, gamma, theta, bandgap)
     objective.add(cost_fn)
-    error_sq = objective.error_squared_norm()
-    optimizer = th.LevenbergMarquardt(objective, max_iterations=10, step_size=0.5)
-    theseus_optim = th.TheseusLayer(optimizer)
-    theseus_optim.to(device=device)
+    # error_sq = objective.error_squared_norm()
+    optimizer = th.TheseusLayer(th.LevenbergMarquardt(objective, max_iterations=10, step_size=0.5))
+    optimizer.to(device=device)
+    return optimizer, objective
 
-    # Send all inputs to GPU if available
-    theseus_inputs = {'energy': energy_tensor.to(device),
-                      'pl': pl_tensor.to(device),
-                      'qfls': guess_tensors[0].to(device),
-                      'gamma': guess_tensors[1].to(device),
-                      'theta': guess_tensors[2].to(device),
-                      'bandgap': guess_tensors[3].to(device)}
-    objective.update(theseus_inputs)
-
-    with torch.no_grad():
-        updated_inputs, info = theseus_optim.forward(
-            theseus_inputs, optimizer_kwargs={'track_best_solution': True, 'verbose': True})
-    return info.best_solution
 
 
 class QFLSCost(th.CostFunction):
@@ -233,6 +286,8 @@ class QFLSCost(th.CostFunction):
         self.register_optim_vars(['qfls', 'gamma', 'theta', 'bandgap'])
         self.register_aux_vars(['E', 'I'])
 
+        self.part1 = 2 * math.pi * self.E.tensor ** 2 / (h ** 3 * c ** 2) * math.e ** (-self.E.tensor / (k * T))
+
     def gen_planck(self):
         """Evaluates generalized Planck equation according to attribute parameters
 
@@ -240,10 +295,9 @@ class QFLSCost(th.CostFunction):
         """
         i_theta = interp_index(self.theta_fine, self.theta.tensor)
         i_energy = interp_index(self.energy_fine, (self.E.tensor - self.bandgap.tensor) / self.gamma.tensor)
-        part1 = 2 * math.pi * self.E.tensor ** 2 / (h ** 3 * c ** 2) * math.e ** (-self.E.tensor / (k * T))
         part2 = math.e ** (self.qfls.tensor / (k * T))
         part3 = (1 - math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]))
-        return torch.squeeze(part1 * part2 * part3)
+        return torch.squeeze(self.part1 * part2 * part3)
 
     def error(self) -> torch.Tensor:
         return self.error_factor*(self.gen_planck() - self.I.tensor)
@@ -255,28 +309,36 @@ class QFLSCost(th.CostFunction):
         """
         i_theta = interp_index(self.theta_fine, self.theta.tensor)
         i_energy = interp_index(self.energy_fine, (self.E.tensor - self.bandgap.tensor) / self.gamma.tensor)
-        part1 = 2 * math.pi * self.E.tensor ** 2 / (h ** 3 * c ** 2) * math.e ** (-self.E.tensor / (k * T))
         part2 = math.e ** (self.qfls.tensor / (k * T))
         part3 = (1 - math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]))
 
-        part3_dgamma = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
-                    self.G[i_theta, i_energy] / (2 * torch.sqrt(self.gamma.tensor)) + (
-                        self.bandgap.tensor - self.E.tensor) / self.gamma.tensor ** (3 / 2) * self.d_energy[
-                        i_theta, i_energy])
-        part3_dtheta = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * torch.sqrt(
-            self.gamma.tensor) * self.d_theta[i_theta, i_energy]
-        part3_dbandgap = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
-                    -1 / torch.sqrt(self.gamma.tensor)) * self.d_energy[i_theta, i_energy]
-
+        # part3_dgamma = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
+        #             self.G[i_theta, i_energy] / (2 * torch.sqrt(self.gamma.tensor)) + (
+        #                 self.bandgap.tensor - self.E.tensor) / self.gamma.tensor ** (3 / 2) * self.d_energy[
+        #                 i_theta, i_energy])
+        # part3_dtheta = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * torch.sqrt(
+        #     self.gamma.tensor) * self.d_theta[i_theta, i_energy]
+        # part3_dbandgap = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
+        #             -1 / torch.sqrt(self.gamma.tensor)) * self.d_energy[i_theta, i_energy]
         j = [
             # Partial derivative of error function wrt qfls
-            self.error_factor*((k * T) ** -1 * part1 * part2 * part3).unsqueeze(-1),
+            self.error_factor*((k * T) ** -1 * self.part1 * part2 * part3).unsqueeze(-1),
             # Partial derivative of error function wrt gamma
-            self.error_factor*(part1 * part2 * part3_dgamma).unsqueeze(-1),
+            self.error_factor*(self.part1 * part2 *
+                               40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
+                                       self.G[i_theta, i_energy] / (2 * torch.sqrt(self.gamma.tensor)) + (
+                                       self.bandgap.tensor - self.E.tensor) / self.gamma.tensor ** (3 / 2) *
+                                       self.d_energy[
+                                           i_theta, i_energy])).unsqueeze(-1),
             # Partial derivative of error function wrt theta
-            self.error_factor*(part1 * part2 * part3_dtheta).unsqueeze(-1),
+            self.error_factor*(self.part1 * part2 *
+                               40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[
+                        i_theta, i_energy]) * torch.sqrt(
+                        self.gamma.tensor) * self.d_theta[i_theta, i_energy]).unsqueeze(-1),
             # Partial derivative of error function wrt bandgap
-            self.error_factor*(part1 * part2 * part3_dbandgap).unsqueeze(-1),
+            self.error_factor*(self.part1 * part2 *
+                               40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
+                                       -1 / torch.sqrt(self.gamma.tensor)) * self.d_energy[i_theta, i_energy]).unsqueeze(-1),
         ]
         return j, self.error()
 
@@ -290,5 +352,5 @@ class QFLSCost(th.CostFunction):
         )
 if __name__ == '__main__':
     energy, pl = import_hyperspectral("C:/Users/cbc37/Desktop/theseusqfls/theseusqfls/data/example_photometric.h5")
-    result = fit_qfls(energy, pl[:, 100:108, 100:108])
+    result = fit_qfls(energy, pl)
     print(result)
