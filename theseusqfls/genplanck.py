@@ -146,29 +146,35 @@ def fit_qfls(energy, pl, guesses=None):
     """
     if guesses is None:
         guesses = [1.1, 0.05, 1.5, 1.6]
-        pl_avg = np.expand_dims(np.mean(pl, axis=(1, 2)), axis=(1, 2))
+        pl_avg = np.mean(pl, axis=(1, 2))
         try:
             guesses, __ = curve_fit(gen_planck, energy, pl_avg, p0=guesses)
         except:
             pass
-    energy_tensor = torch.tensor(energy)
-    pl_tensor = torch.tensor(np.flatten(pl))
-    guess_tensors = [guesses[i]*torch.ones(pl_tensor.shape, 1, dtype=torch.float64) for i in range(len(guesses))]
+    energy_tensor = torch.tensor(energy[None, :], dtype=torch.float32, device=device)
+    pl_reshape = pl.reshape((pl.shape[0], -1)).T
+    pl_tensor = torch.tensor(pl_reshape, dtype=torch.float32, device=device)
+    guess_tensors = [guesses[i]*torch.ones((pl_reshape.shape[0], 1), dtype=torch.float32) for i in range(len(guesses))]
 
     qfls = th.Vector(1, name='qfls', dtype=torch.float32)
+    qfls.to(device)
     gamma = th.Vector(1, name='gamma', dtype=torch.float32)
+    gamma.to(device)
     theta = th.Vector(1, name='theta', dtype=torch.float32)
+    theta.to(device)
     bandgap = th.Vector(1, name='bandgap', dtype=torch.float32)
+    bandgap.to(device)
 
-    cost_weight = th.ScaleCostWeight(torch.tensor(1.0, dtype=torch.float64))
-    objective = th.Objective(dtype=torch.float64)
+    cost_weight = th.ScaleCostWeight(torch.tensor(1.0, dtype=torch.float32, device=device))
+    objective = th.Objective(dtype=torch.float32)
+    objective.to(device=device)
     cost_fn = QFLSCost(cost_weight, th.Variable(energy_tensor, name='energy'), th.Variable(pl_tensor, name='pl'), qfls,
-                       gamma, theta, bandgap)
+                       gamma, theta, bandgap)  
     objective.add(cost_fn)
     error_sq = objective.error_squared_norm()
-    optimizer = th.LevenbergMarquardt(objective, max_iterations=2, step_size=0.1)
+    optimizer = th.LevenbergMarquardt(objective, max_iterations=10, step_size=0.5)
     theseus_optim = th.TheseusLayer(optimizer)
-    theseus_optim.to(device=device)  # TODO check correct data type here
+    theseus_optim.to(device=device)
 
     # Send all inputs to GPU if available
     theseus_inputs = {'energy': energy_tensor.to(device),
@@ -219,8 +225,10 @@ class QFLSCost(th.CostFunction):
         self.gamma = gamma
         self.theta = theta
         self.bandgap = bandgap
+        self.error_factor = 1E-12  # Multiply error by this factor to avoid memory limit
 
-        self.theta_fine, self.energy_fine, self.d_theta, self.d_energy, self.G = gen_lookup_table()
+        lookup = gen_lookup_table()
+        self.theta_fine, self.energy_fine, self.d_theta, self.d_energy, self.G = [arr.to(device) for arr in lookup]
 
         self.register_optim_vars(['qfls', 'gamma', 'theta', 'bandgap'])
         self.register_aux_vars(['E', 'I'])
@@ -238,7 +246,7 @@ class QFLSCost(th.CostFunction):
         return torch.squeeze(part1 * part2 * part3)
 
     def error(self) -> torch.Tensor:
-        return self.gen_planck() - self.I.tensor
+        return self.error_factor*(self.gen_planck() - self.I.tensor)
 
     def jacobians(self) -> Tuple[List[torch.Tensor], torch.Tensor]:
         """Calculates all first-order partial derivatives of multivariate error function
@@ -262,13 +270,13 @@ class QFLSCost(th.CostFunction):
 
         j = [
             # Partial derivative of error function wrt qfls
-            ((k * T) ** -1 * part1 * part2 * part3).unsqueeze(-1),
+            self.error_factor*((k * T) ** -1 * part1 * part2 * part3).unsqueeze(-1),
             # Partial derivative of error function wrt gamma
-            (part1 * part2 * part3_dgamma).unsqueeze(-1),
+            self.error_factor*(part1 * part2 * part3_dgamma).unsqueeze(-1),
             # Partial derivative of error function wrt theta
-            (part1 * part2 * part3_dtheta).unsqueeze(-1),
+            self.error_factor*(part1 * part2 * part3_dtheta).unsqueeze(-1),
             # Partial derivative of error function wrt bandgap
-            (part1 * part2 * part3_dbandgap).unsqueeze(-1),
+            self.error_factor*(part1 * part2 * part3_dbandgap).unsqueeze(-1),
         ]
         return j, self.error()
 
@@ -282,4 +290,5 @@ class QFLSCost(th.CostFunction):
         )
 if __name__ == '__main__':
     energy, pl = import_hyperspectral("C:/Users/cbc37/Desktop/theseusqfls/theseusqfls/data/example_photometric.h5")
-    result = fit_qfls(energy, pl)
+    result = fit_qfls(energy, pl[:, 100:108, 100:108])
+    print(result)
