@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 torch.manual_seed(0)
 
-LOOKUP_TABLE = 'data/lookup_table.csv'
+LOOKUP_TABLE = 'theseusqfls/data/lookup_table.csv'
 h = 4.1357e-15
 c = 2.9979e8
 k = 8.6173e-5
@@ -154,8 +154,8 @@ error_sq = objective.error_squared_norm()
 
 optimizer = th.LevenbergMarquardt(
     objective,
-    max_iterations=100,
-    step_size=0.1
+    max_iterations=25,
+    step_size=0.5
 )
 
 theseus_optim = th.TheseusLayer(optimizer)
