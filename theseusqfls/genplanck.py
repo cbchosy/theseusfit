@@ -1,5 +1,5 @@
 from typing import List, Optional, Tuple
-import pkg_resources
+from pathlib import Path
 import theseus as th
 import torch
 import math
@@ -7,7 +7,6 @@ import h5py
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from scipy.interpolate import RectBivariateSpline
 
@@ -26,8 +25,9 @@ q = 1.602e-19
 T = 298.15
 alpha = 10
 
-LOOKUP_TABLE = "C:/Users/cbc37/Desktop/theseusqfls/theseusqfls/data/lookup_table.csv"
-# STREAM = pkg_resources.resource_stream(__name__, LOOKUP_TABLE)
+data_folder_path = (Path(__file__) / '../../data' ).resolve()
+csv_file_path = data_folder_path / 'lookup_table.csv'
+LOOKUP_TABLE = csv_file_path
 THETA = np.linspace(0.5, 2, round(1.5 / 0.05) + 1)  # Values taken from appropriate endpoints of lookup table
 ENERGY = np.linspace(-60, 100, round((100 + 60) / 0.1) + 1)  # Values taken from appropriate endpoints of lookup table
 integrals = pd.read_csv(LOOKUP_TABLE, names=['G'], usecols=[2])
@@ -44,6 +44,19 @@ def import_hyperspectral(filename):
     cube = np.flip(cube, axis=0)  # TODO add Jacobian transformation here
     cube = 10000 * math.pi * cube
     return energy, cube
+
+
+def crop_data(energy, pl):
+    """ Crops energy axis to only include data points above 10% of peak maximum
+
+    :param energy: Photon energy (eV)
+    :param pl: Photoluminescence intensity
+    :return: Cropped energy and photoluminescence
+    """
+    pl_avg = np.average(pl, axis=(1, 2))
+    low = next((i for i in np.arange(len(pl_avg)) if pl_avg[i] > 0.10 * np.amax(pl_avg)), 0)
+    high = next((i for i in np.flip(np.arange(len(pl_avg))) if pl_avg[i] > 0.10 * np.amax(pl_avg)), None)
+    return energy[low:high], pl[low:high, :, :]
 
 
 def eval_interp(delta_e, theta):
@@ -89,9 +102,7 @@ def gen_planck(energy, qfls, gamma, theta, bandgap):
     part1 = 2 * math.pi * energy ** 2 / (h ** 3 * c ** 2)
     part2 = 1 / (math.e ** ((energy - qfls) / (k * T)) - 1)
     part3 = (1 - math.e ** (-40 * np.sqrt(gamma) * eval_interp((energy - bandgap) / gamma, theta)))
-    part4 = (1 - 2 / (math.e ** ((energy - qfls) / (2 * k * T)) + 1))
-    f = np.array(part1 * part2 * part3 * part4).squeeze()
-    return f
+    return (part1 * part2 * part3).squeeze()
 
 
 def interp_index(arr, val):
@@ -106,7 +117,7 @@ def interp_index(arr, val):
     return indices
 
 
-def fit_qfls(energy, pl, guesses=[1.1, 0.01, 1.5, 1.6], batch_size=256, max_iterations=20):
+def fit_qfls(energy, pl, guesses=(1.1, 0.01, 1.5, 1.6), batch_size=56, max_iterations=20, step_size=0.5, verbose=True):
     """Fits input hyperspectral data according to the generalized Planck equation
 
     :param energy: Input photon energy (eV)
@@ -129,7 +140,7 @@ def fit_qfls(energy, pl, guesses=[1.1, 0.01, 1.5, 1.6], batch_size=256, max_iter
               'gamma': guess_tensors[1].to(device),
               'theta': guess_tensors[2].to(device),
               'bandgap': guess_tensors[3].to(device)}
-    optimizer, objective = init_optimizer(inputs, batch_size, energy.size, max_iterations)
+    optimizer, objective = init_optimizer(inputs, batch_size, energy.size, max_iterations, step_size)
     error_sq = objective.error_squared_norm()
     with torch.no_grad():
         for i in tqdm(range(n_loops)):
@@ -137,31 +148,15 @@ def fit_qfls(energy, pl, guesses=[1.1, 0.01, 1.5, 1.6], batch_size=256, max_iter
             objective.update(inputs)
             updated_inputs, info = optimizer.forward(
                 inputs, optimizer_kwargs={'track_best_solution': True,
-                                          'verbose': True
+                                          'track_err': True,
+                                          'verbose': verbose
                                           })
-            optimizer.zero_grad()
             for key in result.keys():
                 result[key][i * batch_size:(i + 1) * batch_size] = info.best_solution[key].numpy().flatten()
-    return result
-    #
-    #
-    #
-    # # Send all inputs to GPU if available
-    # theseus_inputs = {'energy': energy_tensor.to(device),
-    #                   'pl': pl_tensor.to(device),
-    #                   'qfls': guess_tensors[0].to(device),
-    #                   'gamma': guess_tensors[1].to(device),
-    #                   'theta': guess_tensors[2].to(device),
-    #                   'bandgap': guess_tensors[3].to(device)}
-    # objective.update(theseus_inputs)
-    #
-    # with torch.no_grad():
-    #     updated_inputs, info = theseus_optim.forward(
-    #         theseus_inputs, optimizer_kwargs={'track_best_solution': True, 'verbose': True})
-    # return info.best_solution
+    return result, info
 
 
-def init_optimizer(inputs, batch_size, data_size, max_iterations):
+def init_optimizer(inputs, batch_size, data_size, max_iterations, step_size):
     energy = th.Variable(torch.ones((batch_size, data_size), dtype=torch.float32), name='energy')
     energy.to(device)
     pl = th.Variable(torch.ones((batch_size, data_size), dtype=torch.float32), name='pl')
@@ -182,7 +177,7 @@ def init_optimizer(inputs, batch_size, data_size, max_iterations):
     objective.add(cost_fn)
     objective.update(inputs)
     error_sq = objective.error_squared_norm()
-    optimizer = th.TheseusLayer(th.LevenbergMarquardt(objective, max_iterations=max_iterations, step_size=0.25))
+    optimizer = th.TheseusLayer(th.LevenbergMarquardt(objective, max_iterations=max_iterations, step_size=step_size))
     optimizer.to(device=device)
     return optimizer, objective
 
@@ -195,8 +190,8 @@ class QFLSCost(th.CostFunction):
     def __init__(
             self,
             cost_weight: th.CostWeight,
-            E: th.Variable,
-            I: th.Variable,
+            energy: th.Variable,
+            pl: th.Variable,
             qfls: th.Vector,
             gamma: th.Vector,
             theta: th.Vector,
@@ -206,8 +201,8 @@ class QFLSCost(th.CostFunction):
         """Initializes QFLSCost with auxiliary and optimization variables
 
         :param cost_weight: Used to weight errors and jacobians
-        :param E: Photon energy (eV) (auxiliary variable)
-        :param I: Photoluminescence intensity (m^-2 s^-1 eV^-1) (auxiliary variable)
+        :param energy: Photon energy (eV) (auxiliary variable)
+        :param pl: Photoluminescence intensity (m^-2 s^-1 eV^-1) (auxiliary variable)
         :param qfls: Quasi-Fermi level splitting (eV)
         :param gamma: Sub-bandgap absorption broadening energy
         :param theta: Functional form of sub-bandgap absorption
@@ -215,21 +210,20 @@ class QFLSCost(th.CostFunction):
         :param name: Optional name assigned to cost function
         """
         super().__init__(cost_weight, name=name)
-        self.E = E
-        self.I = I
+        self.energy = energy
+        self.pl = pl
         self.qfls = qfls
         self.gamma = gamma
         self.theta = theta
         self.bandgap = bandgap
-        self.error_factor = 1.0  # Multiply error by this factor to avoid memory limit
 
-        lookup = gen_lookup_table()
+        lookup = gen_lookup_table(accuracy_factor=4)
         self.theta_fine, self.energy_fine, self.d_theta, self.d_energy, self.G = [arr.to(device) for arr in lookup]
 
         self.register_optim_vars(['qfls', 'gamma', 'theta', 'bandgap'])
-        self.register_aux_vars(['E', 'I'])
+        self.register_aux_vars(['energy', 'pl'])
 
-        self.part1 = 2 * math.pi * self.E.tensor ** 2 / (h ** 3 * c ** 2) * math.e ** (-self.E.tensor / (k * T))
+        self.part1 = 2 * math.pi * self.energy.tensor ** 2 / (h ** 3 * c ** 2) * math.e ** (-self.energy.tensor / (k * T))
 
     def gen_planck(self):
         """Evaluates generalized Planck equation according to attribute parameters
@@ -237,13 +231,18 @@ class QFLSCost(th.CostFunction):
         :return: Photoluminescence spectrum
         """
         i_theta = interp_index(self.theta_fine, self.theta.tensor)
-        i_energy = interp_index(self.energy_fine, (self.E.tensor - self.bandgap.tensor) / self.gamma.tensor)
-        part2 = math.e ** (self.qfls.tensor / (k * T))
-        part3 = (1 - math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]))
-        return torch.squeeze(self.part1 * part2 * part3)
+        i_energy = interp_index(self.energy_fine, (self.energy.tensor - self.bandgap.tensor) / self.gamma.tensor)
+        return torch.squeeze(
+            # Part 1
+            torch.log(2 * math.pi * self.energy.tensor ** 2 / (h ** 3 * c ** 2)) - self.energy.tensor / (k * T) +
+            # Part 2
+            self.qfls.tensor / (k * T) +
+            # Part 3
+            torch.log(1 - math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]))
+        )
 
     def error(self) -> torch.Tensor:
-        return torch.tensor(self.error_factor * (self.gen_planck() - self.I.tensor), dtype=torch.float64)
+        return self.gen_planck() - torch.log(self.pl.tensor)
 
     def jacobians(self) -> Tuple[List[torch.Tensor], torch.Tensor]:
         """Calculates all first-order partial derivatives of multivariate error function
@@ -251,63 +250,54 @@ class QFLSCost(th.CostFunction):
         :return: Jacobian matrix of error function, error function
         """
         i_theta = interp_index(self.theta_fine, self.theta.tensor)
-        i_energy = interp_index(self.energy_fine, (self.E.tensor - self.bandgap.tensor) / self.gamma.tensor)
-        part2 = math.e ** (self.qfls.tensor / (k * T))
-        part3 = (1 - math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]))
+        i_energy = interp_index(self.energy_fine, (self.energy.tensor - self.bandgap.tensor) / self.gamma.tensor)
+        const = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy])
+        part_3 = 1 - math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy])
+        part3_dgamma = const * (self.G[i_theta, i_energy] / (2 * torch.sqrt(self.gamma.tensor)) + (
+                    self.bandgap.tensor - self.energy.tensor) / self.gamma.tensor ** (3 / 2) * self.d_energy[
+                                    i_theta, i_energy])
+        part3_dtheta = const * torch.sqrt(self.gamma.tensor) * self.d_theta[i_theta, i_energy]
+        part3_dbandgap = const * (-1 / torch.sqrt(self.gamma.tensor)) * self.d_energy[i_theta, i_energy]
 
-        # part3_dgamma = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
-        #             self.G[i_theta, i_energy] / (2 * torch.sqrt(self.gamma.tensor)) + (
-        #                 self.bandgap.tensor - self.E.tensor) / self.gamma.tensor ** (3 / 2) * self.d_energy[
-        #                 i_theta, i_energy])
-        # part3_dtheta = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * torch.sqrt(
-        #     self.gamma.tensor) * self.d_theta[i_theta, i_energy]
-        # part3_dbandgap = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
-        #             -1 / torch.sqrt(self.gamma.tensor)) * self.d_energy[i_theta, i_energy]
         j = [
-            # Partial derivative of error function wrt qfls
-            self.error_factor * ((k * T) ** -1 * self.part1 * part2 * part3).unsqueeze(-1),
-            # Partial derivative of error function wrt gamma
-            self.error_factor * (self.part1 * part2 *
-                                 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
-                                         self.G[i_theta, i_energy] / (2 * torch.sqrt(self.gamma.tensor)) + (
-                                         self.bandgap.tensor - self.E.tensor) / self.gamma.tensor ** (3 / 2) *
-                                         self.d_energy[
-                                             i_theta, i_energy])).unsqueeze(-1),
-            # Partial derivative of error function wrt theta
-            self.error_factor * (self.part1 * part2 *
-                                 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[
-                        i_theta, i_energy]) * torch.sqrt(
-                        self.gamma.tensor) * self.d_theta[i_theta, i_energy]).unsqueeze(-1),
-            # Partial derivative of error function wrt bandgap
-            self.error_factor * (self.part1 * part2 *
-                                 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]) * (
-                                         -1 / torch.sqrt(self.gamma.tensor)) * self.d_energy[
-                                     i_theta, i_energy]).unsqueeze(-1),
+            # jacobian of error function wrt qfls
+            (k * T) ** -1,
+            # jacobian of error function wrt gamma
+            (part3_dgamma / part_3).unsqueeze(-1),
+            # jacobian of error function wrt theta
+            (part3_dtheta / part_3).unsqueeze(-1),
+            # jacobian of error function wrt bandgap
+            (part3_dbandgap / part_3).unsqueeze(-1),
         ]
         return j, self.error()
 
     def dim(self) -> int:
-        return self.I.tensor.shape[1]
+        return self.pl.tensor.shape[1]
 
     def _copy_impl(self, new_name: Optional[str] = None) -> "QFLSCost":
         return QFLSCost(
-            self.weight.copy(), self.E.copy(), self.I.copy(), self.qfls.copy(), self.gamma.copy(), self.theta.copy(),
+            self.weight.copy(), self.energy.copy(), self.pl.copy(), self.qfls.copy(), self.gamma.copy(), self.theta.copy(),
             self.bandgap.copy(), name=new_name
         )
 
 
 if __name__ == '__main__':
-    with h5py.File('C:/Users/cbc37/Desktop/theseusqfls/theseusqfls/data/example_photometric.h5') as f:
-        energy = np.array(f['energy'])
-        pl = np.array(f['pl'])
-    guesses = [1.1, 0.01, 1.5, 1.7]
-    fig, ax = plt.subplots()
-    ax.plot(energy, pl[:, 0, 0])
-    plt.show()
-    result = fit_qfls(energy, pl[:, :256, 0], guesses=guesses, max_iterations=100)
-    print(result['qfls'])
-    # n_iterations = 20
-    #
-    # for i in range(n_iterations):
+    energy = np.linspace(1.65, 1.75, 50)
+    qfls = 1.12*np.ones((1024, 1024)) + 0.01*(np.random.random((1024, 1024)) - 0.5)
+    gamma = 0.02*np.ones((1024, 1024)) + 0.002*(np.random.random((1024, 1024)) - 0.5)
+    theta = 1.5*np.ones((1024, 1024)) + 0.05*(np.random.random((1024, 1024)) - 0.5)
+    bandgap = 1.6*np.ones((1024, 1024)) + 0.05*(np.random.random((1024, 1024)) - 0.5)
+    pl = np.zeros((energy.size, qfls.shape[0], qfls.shape[1]))
+    for i in range(qfls.shape[0]):
+        for j in range(qfls.shape[1]):
+            pl[:, i, j] = gen_planck(energy, qfls[i, j], gamma[i, j], theta[i, j], bandgap[i, j])
 
-
+    energy_crop, pl_crop = crop_data(energy, pl)
+    init_guesses = [1.2, 0.025, 1.0, 1.7]
+    points = [255, 511, 767]
+    guesses = np.zeros((4, len(points), len(points)))
+    for i in range(len(points)):
+        for j in range(len(points)):
+            guesses[:, i, j], __ = curve_fit(gen_planck, energy_crop, pl_crop[:, i, j].squeeze(), p0=init_guesses)
+    guesses = list(np.mean(guesses, axis=(1, 2)))
+    result = fit_qfls(energy_crop, pl_crop, guesses=[1.13, 0.021, 1.58, 1.63], batch_size=1024, max_iterations=20, verbose=False)
