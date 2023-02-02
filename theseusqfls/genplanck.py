@@ -153,6 +153,8 @@ def fit_qfls(energy, pl, guesses=(1.1, 0.01, 1.5, 1.6), batch_size=56, max_itera
                                           })
             for key in result.keys():
                 result[key][i * batch_size:(i + 1) * batch_size] = info.best_solution[key].numpy().flatten()
+    for key in result.keys():
+        result[key] = result[key].reshape((pl.shape[1], pl.shape[2]))
     return result, info
 
 
