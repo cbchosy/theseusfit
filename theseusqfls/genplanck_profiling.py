@@ -41,7 +41,7 @@ def import_hyperspectral(filename):
         cube = np.asarray(f['Cube/Images'], dtype=np.float32)
     cube = np.clip(cube, 0, None)
     energy = 1E9 * h * c / np.flip(wavelength, axis=0)
-    cube = np.flip(cube, axis=0)  # TODO add Jacobian transformation here
+    cube = np.flip(cube, axis=0)
     cube = 10000 * math.pi * cube
     return energy, cube
 
@@ -140,7 +140,7 @@ def fit_qfls(energy, pl, guesses=(1.1, 0.01, 1.5, 1.6), batch_size=56, max_itera
               'gamma': guess_tensors[1].to(device),
               'theta': guess_tensors[2].to(device),
               'bandgap': guess_tensors[3].to(device)}
-    optimizer, objective = init_optimizer(inputs, batch_size, energy.size, max_iterations, step_size)
+    optimizer, objective = init_optimizer(inputs, batch_size, energy.size, max_iterations, step_size, accuracy)
     error_sq = objective.error_squared_norm()
     with torch.no_grad():
         with torch.profiler.profile(
@@ -169,7 +169,7 @@ def fit_qfls(energy, pl, guesses=(1.1, 0.01, 1.5, 1.6), batch_size=56, max_itera
     return result, info
 
 
-def init_optimizer(inputs, batch_size, data_size, max_iterations, step_size):
+def init_optimizer(inputs, batch_size, data_size, max_iterations, step_size, accuracy):
     energy = th.Variable(torch.ones((batch_size, data_size), dtype=torch.float32), name='energy')
     energy.to(device)
     pl = th.Variable(torch.ones((batch_size, data_size), dtype=torch.float32), name='pl')
@@ -186,7 +186,7 @@ def init_optimizer(inputs, batch_size, data_size, max_iterations, step_size):
     cost_weight = th.ScaleCostWeight(torch.tensor(1.0, dtype=torch.float32, device=device))
     objective = th.Objective(dtype=torch.float32)
     objective.to(device=device)
-    cost_fn = QFLSCost(cost_weight, energy, pl, qfls, gamma, theta, bandgap)
+    cost_fn = QFLSCost(cost_weight, energy, pl, qfls, gamma, theta, bandgap, accuracy=accuracy)
     objective.add(cost_fn)
     objective.update(inputs)
     error_sq = objective.error_squared_norm()
@@ -210,6 +210,7 @@ class QFLSCost(th.CostFunction):
             theta: th.Vector,
             bandgap: th.Vector,
             name: Optional[str] = None,
+            accuracy: Optional[int] = 4
     ):
         """Initializes QFLSCost with auxiliary and optimization variables
 
@@ -230,7 +231,7 @@ class QFLSCost(th.CostFunction):
         self.theta = theta
         self.bandgap = bandgap
 
-        lookup = gen_lookup_table(accuracy_factor=4)
+        lookup = gen_lookup_table(accuracy_factor=accuracy)
         self.theta_fine, self.energy_fine, self.d_theta, self.d_energy, self.G = [arr.to(device) for arr in lookup]
 
         self.register_optim_vars(['qfls', 'gamma', 'theta', 'bandgap'])
@@ -296,21 +297,19 @@ class QFLSCost(th.CostFunction):
 
 if __name__ == '__main__':
     energy = np.linspace(1.65, 1.75, 50)
-    qfls = 1.12*np.ones((1024, 1024)) + 0.01*(np.random.random((1024, 1024)) - 0.5)
-    gamma = 0.02*np.ones((1024, 1024)) + 0.002*(np.random.random((1024, 1024)) - 0.5)
-    theta = 1.5*np.ones((1024, 1024)) + 0.05*(np.random.random((1024, 1024)) - 0.5)
-    bandgap = 1.6*np.ones((1024, 1024)) + 0.05*(np.random.random((1024, 1024)) - 0.5)
+    qfls = 1.12 * np.ones((1024, 1024)) + 0.01 * (np.random.random((1024, 1024)) - 0.5)
+    gamma = 0.02 * np.ones((1024, 1024)) + 0.002 * (np.random.random((1024, 1024)) - 0.5)
+    theta = 1.5 * np.ones((1024, 1024)) + 0.05 * (np.random.random((1024, 1024)) - 0.5)
+    bandgap = 1.6 * np.ones((1024, 1024)) + 0.05 * (np.random.random((1024, 1024)) - 0.5)
     pl = np.zeros((energy.size, qfls.shape[0], qfls.shape[1]))
-    for i in range(qfls.shape[0]):
-        for j in range(qfls.shape[1]):
-            pl[:, i, j] = gen_planck(energy, qfls[i, j], gamma[i, j], theta[i, j], bandgap[i, j])
 
-    energy_crop, pl_crop = crop_data(energy, pl)
-    init_guesses = [1.2, 0.025, 1.0, 1.7]
+    exp_energy, exp_pl = import_hyperspectral('../data/example_photometric.h5')
+    exp_energy_crop, exp_pl_crop = crop_data(exp_energy, exp_pl)
+    init_guesses = [1.2, 0.025, 1.5, 1.7]
     points = [255, 511, 767]
     guesses = np.zeros((4, len(points), len(points)))
     for i in range(len(points)):
         for j in range(len(points)):
-            guesses[:, i, j], __ = curve_fit(gen_planck, energy_crop, pl_crop[:, i, j].squeeze(), p0=init_guesses)
+            guesses[:, i, j], __ = curve_fit(gen_planck, exp_energy_crop, exp_pl_crop[:, i, j].squeeze(), p0=init_guesses)
     guesses = list(np.mean(guesses, axis=(1, 2)))
-    result = fit_qfls(energy_crop, pl_crop, guesses=[1.13, 0.021, 1.58, 1.63], batch_size=1024, max_iterations=20, verbose=False)
+    result = fit_qfls(exp_energy_crop, exp_pl_crop, guesses=guesses, batch_size=2048, max_iterations=10, step_size=1, accuracy=2, verbose=False)
