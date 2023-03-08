@@ -7,7 +7,7 @@ setuptools.setup(
     description='GPU-accelerated curve fitting using nonlinear optimization from Theseus',
     url='https://github.com/cbchosy/theseusqfls',
     packages=setuptools.find_packages(),
-    includ_package_data=True,
+    include_package_data=True,
     python_requires='>=3.6',
     install_requires=[
         'packaging',
