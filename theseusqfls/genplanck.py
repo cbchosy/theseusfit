@@ -1,5 +1,4 @@
 from typing import List, Optional, Tuple
-from pathlib import Path
 import theseus as th
 import torch
 import math
@@ -25,9 +24,7 @@ q = 1.602e-19
 T = 298.15
 alpha = 10
 
-data_folder_path = (Path(__file__) / '../../data' ).resolve()
-csv_file_path = data_folder_path / 'lookup_table.csv'
-LOOKUP_TABLE = csv_file_path
+LOOKUP_TABLE = './data/lookup_table.csv'
 THETA = np.linspace(0.5, 2, round(1.5 / 0.05) + 1)  # Values taken from appropriate endpoints of lookup table
 ENERGY = np.linspace(-60, 100, round((100 + 60) / 0.1) + 1)  # Values taken from appropriate endpoints of lookup table
 integrals = pd.read_csv(LOOKUP_TABLE, names=['G'], usecols=[2])
@@ -292,7 +289,7 @@ if __name__ == '__main__':
     bandgap = 1.6 * np.ones((1024, 1024)) + 0.05 * (np.random.random((1024, 1024)) - 0.5)
     pl = np.zeros((energy.size, qfls.shape[0], qfls.shape[1]))
 
-    exp_energy, exp_pl = import_hyperspectral('../data/example_photometric.h5')
+    exp_energy, exp_pl = import_hyperspectral('data/example_photometric.h5')
     exp_energy_crop, exp_pl_crop = crop_data(exp_energy, exp_pl)
     init_guesses = [1.2, 0.025, 1.5, 1.7]
     points = [255, 511, 767]
