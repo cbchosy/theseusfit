@@ -6,9 +6,10 @@ setuptools.setup(
     license='MIT',
     description='GPU-accelerated curve fitting using nonlinear optimization from Theseus',
     url='https://github.com/cbchosy/theseusqfls',
-    packages=['theseusqfls'],
+    packages=setuptools.find_packages(),
     python_requires='>=3.6',
     install_requires=[
+        'packaging',
         'theseus',
         'torch',
         'h5py',
