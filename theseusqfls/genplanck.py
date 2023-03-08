@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple
+import pkg_resources
 import theseus as th
 import torch
 import math
@@ -24,7 +25,7 @@ q = 1.602e-19
 T = 298.15
 alpha = 10
 
-LOOKUP_TABLE = './data/lookup_table.csv'
+LOOKUP_TABLE = pkg_resources.resource_stream(__name__, 'data/lookup_table.csv')
 THETA = np.linspace(0.5, 2, round(1.5 / 0.05) + 1)  # Values taken from appropriate endpoints of lookup table
 ENERGY = np.linspace(-60, 100, round((100 + 60) / 0.1) + 1)  # Values taken from appropriate endpoints of lookup table
 integrals = pd.read_csv(LOOKUP_TABLE, names=['G'], usecols=[2])
