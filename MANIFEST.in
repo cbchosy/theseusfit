@@ -1,1 +1,1 @@
-include scipy/*.csv
+include scipy/data/*.csv
