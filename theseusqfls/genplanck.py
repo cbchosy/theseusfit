@@ -23,14 +23,17 @@ c = 2.9979e8
 k = 8.6173e-5
 q = 1.602e-19
 T = 298.15
-alpha = 10
-
-LOOKUP_TABLE = pkg_resources.resource_stream(__name__, 'data/lookup_table.csv')
+alpha = 5
 THETA = np.linspace(0.5, 2, round(1.5 / 0.05) + 1)  # Values taken from appropriate endpoints of lookup table
 ENERGY = np.linspace(-60, 100, round((100 + 60) / 0.1) + 1)  # Values taken from appropriate endpoints of lookup table
-integrals = pd.read_csv(LOOKUP_TABLE, names=['G'], usecols=[2])
-integrals = np.reshape(integrals['G'].to_numpy(), (THETA.size, ENERGY.size))
-SPLINE_INTERP = RectBivariateSpline(THETA, ENERGY, integrals, kx=3, ky=3, s=0)
+
+LOOKUP_TABLE = pkg_resources.resource_stream(__name__, 'data/lookup_table.csv')
+
+
+def generate_integral_table(filename):
+    integrals = pd.read_csv(LOOKUP_TABLE, names=['G'], usecols=[2])
+    integrals = np.reshape(integrals['G'].to_numpy(), (THETA.size, ENERGY.size))
+    SPLINE_INTERP = RectBivariateSpline(THETA, ENERGY, integrals, kx=3, ky=3, s=0)
 
 
 def import_hyperspectral(filename):
@@ -99,7 +102,7 @@ def gen_planck(energy, qfls, gamma, theta, bandgap):
     """
     part1 = 2 * math.pi * energy ** 2 / (h ** 3 * c ** 2)
     part2 = 1 / (math.e ** ((energy - qfls) / (k * T)) - 1)
-    part3 = (1 - math.e ** (-40 * np.sqrt(gamma) * eval_interp((energy - bandgap) / gamma, theta)))
+    part3 = (1 - math.e ** (-alpha * np.sqrt(gamma) * eval_interp((energy - bandgap) / gamma, theta)))
     return (part1 * part2 * part3).squeeze()
 
 
@@ -239,7 +242,7 @@ class QFLSCost(th.CostFunction):
             # Part 2
             self.qfls.tensor / (k * T) +
             # Part 3
-            torch.log(1 - math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]))
+            torch.log(1 - math.e ** (-alpha * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy]))
         )
 
     def error(self) -> torch.Tensor:
@@ -252,8 +255,8 @@ class QFLSCost(th.CostFunction):
         """
         i_theta = interp_index(self.theta_fine, self.theta.tensor)
         i_energy = interp_index(self.energy_fine, (self.energy.tensor - self.bandgap.tensor) / self.gamma.tensor)
-        const = 40 * math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy])
-        part_3 = 1 - math.e ** (-40 * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy])
+        const = alpha * math.e ** (-alpha * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy])
+        part_3 = 1 - math.e ** (-alpha * torch.sqrt(self.gamma.tensor) * self.G[i_theta, i_energy])
         part3_dgamma = const * (self.G[i_theta, i_energy] / (2 * torch.sqrt(self.gamma.tensor)) + (
                     self.bandgap.tensor - self.energy.tensor) / self.gamma.tensor ** (3 / 2) * self.d_energy[
                                     i_theta, i_energy])
@@ -280,23 +283,3 @@ class QFLSCost(th.CostFunction):
             self.weight.copy(), self.energy.copy(), self.pl.copy(), self.qfls.copy(), self.gamma.copy(), self.theta.copy(),
             self.bandgap.copy(), name=new_name
         )
-
-
-if __name__ == '__main__':
-    energy = np.linspace(1.65, 1.75, 50)
-    qfls = 1.12 * np.ones((1024, 1024)) + 0.01 * (np.random.random((1024, 1024)) - 0.5)
-    gamma = 0.02 * np.ones((1024, 1024)) + 0.002 * (np.random.random((1024, 1024)) - 0.5)
-    theta = 1.5 * np.ones((1024, 1024)) + 0.05 * (np.random.random((1024, 1024)) - 0.5)
-    bandgap = 1.6 * np.ones((1024, 1024)) + 0.05 * (np.random.random((1024, 1024)) - 0.5)
-    pl = np.zeros((energy.size, qfls.shape[0], qfls.shape[1]))
-
-    exp_energy, exp_pl = import_hyperspectral('data/example_photometric.h5')
-    exp_energy_crop, exp_pl_crop = crop_data(exp_energy, exp_pl)
-    init_guesses = [1.2, 0.025, 1.5, 1.7]
-    points = [255, 511, 767]
-    guesses = np.zeros((4, len(points), len(points)))
-    for i in range(len(points)):
-        for j in range(len(points)):
-            guesses[:, i, j], __ = curve_fit(gen_planck, exp_energy_crop, exp_pl_crop[:, i, j].squeeze(), p0=init_guesses)
-    guesses = list(np.mean(guesses, axis=(1, 2)))
-    result = fit_qfls(exp_energy_crop, exp_pl_crop, guesses=guesses, batch_size=2048, max_iterations=10, step_size=1, accuracy=2, verbose=False)
