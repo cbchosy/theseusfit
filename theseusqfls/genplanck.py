@@ -26,14 +26,11 @@ T = 298.15
 alpha = 5
 THETA = np.linspace(0.5, 2, round(1.5 / 0.05) + 1)  # Values taken from appropriate endpoints of lookup table
 ENERGY = np.linspace(-60, 100, round((100 + 60) / 0.1) + 1)  # Values taken from appropriate endpoints of lookup table
-
 LOOKUP_TABLE = pkg_resources.resource_stream(__name__, 'data/lookup_table.csv')
 
-
-def generate_integral_table(filename):
-    integrals = pd.read_csv(LOOKUP_TABLE, names=['G'], usecols=[2])
-    integrals = np.reshape(integrals['G'].to_numpy(), (THETA.size, ENERGY.size))
-    SPLINE_INTERP = RectBivariateSpline(THETA, ENERGY, integrals, kx=3, ky=3, s=0)
+integrals = pd.read_csv(LOOKUP_TABLE, names=['G'], usecols=[2])
+integrals = np.reshape(integrals['G'].to_numpy(), (THETA.size, ENERGY.size))
+SPLINE_INTERP = RectBivariateSpline(THETA, ENERGY, integrals, kx=3, ky=3, s=0)
 
 
 def import_hyperspectral(filename):
