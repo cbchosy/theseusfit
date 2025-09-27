@@ -1,5 +1,5 @@
 import numpy as np
-from theseusqfls import genplanck
+from theseusfit import genplanck
 from scipy.optimize import curve_fit
 import tkinter as tk
 from tkinter import filedialog

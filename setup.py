@@ -1,7 +1,7 @@
 import setuptools
 
 setuptools.setup(
-    name='theseusqfls',
+    name='theseusfit',
     version='1.0',
     license='MIT',
     description='GPU-accelerated curve fitting using nonlinear optimization from Theseus',

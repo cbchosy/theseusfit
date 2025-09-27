@@ -139,7 +139,6 @@ def fit_qfls(energy, pl, guesses=(1.1, 0.01, 1.5, 1.6), batch_size=56, max_itera
               'theta': guess_tensors[2].to(device),
               'bandgap': guess_tensors[3].to(device)}
     optimizer, objective = init_optimizer(inputs, batch_size, energy.size, max_iterations, step_size, accuracy)
-    error_sq = objective.error_squared_norm()
     with torch.no_grad():
         for i in tqdm(range(n_loops)):
             inputs['pl'] = pl_tensor[i * batch_size:(i + 1) * batch_size, :]
@@ -176,7 +175,6 @@ def init_optimizer(inputs, batch_size, data_size, max_iterations, step_size, acc
     cost_fn = QFLSCost(cost_weight, energy, pl, qfls, gamma, theta, bandgap, accuracy=accuracy)
     objective.add(cost_fn)
     objective.update(inputs)
-    error_sq = objective.error_squared_norm()
     optimizer = th.TheseusLayer(th.LevenbergMarquardt(objective, max_iterations=max_iterations, step_size=step_size))
     optimizer.to(device=device)
     return optimizer, objective
